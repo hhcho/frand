@@ -1,4 +1,4 @@
-module lukechampine.com/frand
+module github.com/hhcho/frand
 
 go 1.12
 
