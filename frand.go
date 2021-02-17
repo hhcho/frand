@@ -30,6 +30,34 @@ type RNG struct {
 	buf    []byte
 	n      int
 	rounds int
+	prev   []byte // Previous key used to fill in the current buffer (for caching purposes)
+}
+
+func (r *RNG) Marshal() []byte {
+	dat := make([]byte, chacha.KeySize+8) // prev + n + rounds
+
+	copy(dat, r.prev)
+	binary.LittleEndian.PutUint32(dat[chacha.KeySize:], uint32(r.n))
+	binary.LittleEndian.PutUint32(dat[chacha.KeySize+4:], uint32(r.rounds))
+
+	return dat
+}
+
+func Unmarshal(dat []byte, bufSize int) *RNG {
+	size := len(dat)
+
+	if size != chacha.KeySize+8 {
+		panic("frand: data provided to Unmarshal has invalid size")
+	}
+
+	seed := dat[:chacha.KeySize]
+	n := binary.LittleEndian.Uint32(dat[chacha.KeySize : chacha.KeySize+4])
+	rounds := binary.LittleEndian.Uint32(dat[chacha.KeySize+4:])
+
+	r := NewCustom(seed, bufSize, int(rounds))
+	r.Skip(int(n) - chacha.KeySize)
+
+	return r
 }
 
 // Read fills b with random data. It always returns len(b), nil.
@@ -48,6 +76,7 @@ func (r *RNG) Read(b []byte) (int, error) {
 	} else if len(b) <= len(r.buf[r.n:])+len(r.buf[chacha.KeySize:]) {
 		// b is larger than current buffer, but can be filled after a reseed
 		n := copy(b, r.buf[r.n:])
+		copy(r.prev, r.buf[:chacha.KeySize])
 		chacha.XORKeyStream(r.buf, r.buf, make([]byte, chacha.NonceSize), r.buf[:chacha.KeySize], r.rounds)
 		r.n = chacha.KeySize + copyAndErase(b[n:], r.buf[chacha.KeySize:])
 	} else {
@@ -59,6 +88,26 @@ func (r *RNG) Read(b []byte) (int, error) {
 		erase(tmpKey)
 	}
 	return len(b), nil
+}
+
+// Same buffering behavior as Read but does not copy data
+func (r *RNG) Skip(nBytes int) (int, error) {
+	if nBytes <= len(r.buf[r.n:]) {
+		// can fill b entirely from buffer
+		r.n += nBytes
+	} else if nBytes <= len(r.buf[r.n:])+len(r.buf[chacha.KeySize:]) {
+		// b is larger than current buffer, but can be filled after a reseed
+		n := len(r.buf[r.n:])
+		copy(r.prev, r.buf[:chacha.KeySize])
+		chacha.XORKeyStream(r.buf, r.buf, make([]byte, chacha.NonceSize), r.buf[:chacha.KeySize], r.rounds)
+		r.n = chacha.KeySize + nBytes - n
+	} else {
+		// filling b would require multiple reseeds; instead, generate a
+		// temporary key, then write directly into b using that key
+		r.Skip(chacha.KeySize)
+	}
+
+	return nBytes, nil
 }
 
 // Bytes is a helper function that allocates and returns n bytes of random data.
@@ -165,6 +214,7 @@ func NewCustom(seed []byte, bufsize int, rounds int) *RNG {
 		buf:    buf,
 		n:      chacha.KeySize,
 		rounds: rounds,
+		prev:   seed,
 	}
 }
 
